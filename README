@@ -1,0 +1,183 @@
+#krb5-ldapsync
+
+### A MIT kadmin plugin to sync a Kerberos passwd a LDAP server
+
+
+NOTE: This is prof of concept code, I've not spent time 
+fixing memory management hence it will leak memory. I will
+update/fix the code so it's ready for production some time
+this spring.
+
+The basic code is from the https://code.google.com/p/krb5-adsync/
+project which been heavily modified. The ldap.c is new, only
+keeping function names. There are also lots changes in most of
+the other source files. 
+
+Anyways the idea is that you might want to auth against a LDAP server 
+but still use the same password that the users have on the
+main kerberos server. The kadmin server provides a plugin interface
+where you can trig any type of action when you do updates on your 
+kdc admin server. This plugin triggers an update of a ldap server
+you specify in the krb5.conf file on your kerberos server.
+
+There is a binary krb5sync.so compiled for RHEL 6 running 
+the std RHEL MIT Kerberos server. The plugin will update
+a redhat DS389 server that has UNIX account information that 
+been migrated from files to LDAP with PADL Software migration
+scripts.
+
+A LDIF user account looks something like this:
+
+# oligscha, People, acme.com
+
+dn: uid=jinxolin,ou=People,dc=acme,dc=com
+loginShell: /sbin/nologin
+gidNumber: 14500
+uidNumber: 14409
+uid: jinxolin
+objectClass: account
+objectClass: posixAccount
+objectClass: top
+homeDirectory: /home/jinxolin
+cn: jinxolin
+userPassword:: e2NyeXB0fXg=
+
+The plugin krb5sync.so goes in:
+/usr/lib64/krb5/plugins/kadm5_hook/
+
+The /etc/krb5.conf file need the ldapinfo
+
+[appdefaults]
+
+sync = {
+          ldapuri          = ldap://localhost:389
+          basedn           = ou=People,dc=acme,dc=com
+          password         = /etc/passwdldap
+          binddn           = cn=Directory Manager
+          realmstring      = @ACME.COM
+          syslog           = true
+      }
+
+
+
+[plugins]
+
+   kadm5_hook = {
+       module = sync:/usr/lib64/krb5/plugins/kadm5_hook/krb5sync.so
+   }
+
+
+The password field holds the filename where the binddn password
+is stored. It goes without saying it should be 400 mode and owned
+by root.
+
+Here is an example: 
+[root@acmecomp ~]# cat /etc/passwdldap
+MyFantasicPassword
+[root@acmecomp ~]#
+
+
+
+Here is an example how the plugin will work:
+NOTE: When exprimenting don't try to change password
+just after starting the kadmind daemon. It can very
+well take 3-5 min for it to startup!
+
+First a auth against the ldap server as 
+[root@acmecomp ~]#LDAPTLS_CACERTDIR=/etc/ssl/certs/ ldapsearch -ZZ  -h localhost  -D "uid=jinxolin,ou=People,dc=acme,dc=com" -w zxcvbn -b "ou=People,dc=acme,dc=com" uid=jinxolin
+# LDAPv3
+# base <ou=People,dc=acme,dc=com> with scope subtree
+# filter: uid=jinxolin
+# requesting: ALL
+#
+
+# jinxolin, People, acme.com
+dn: uid=jinxolin,ou=People,dc=acme,dc=com
+<snip>
+cn: jinxolin
+
+# search result
+search: 3
+result: 0 Success
+
+# numResponses: 2
+# numEntries: 1
+
+
+[root@acmecomp ~]# kadmin -p admin/admin
+Authenticating as principal admin/admin with password.
+Password for admin/admin@ACME.COM:
+kadmin:  cpw jinxolin
+Enter password for principal "jinxolin@ACME.COM":
+Re-enter password for principal "jinxolin@ACME.COM":
+Password for "jinxolin@ACME.COM" changed.
+
+* Test with the old password
+[root@acmecomp ~]# LDAPTLS_CACERTDIR=/etc/ssl/certs/ ldapsearch -ZZ  -h localhost  -D "uid=jinxolin,ou=People,dc=acme,dc=com" -w zxcvbn -b "ou=People,dc=acme,dc=com" uid=jinxolin
+ldap_bind: Invalid credentials (49)
+
+* Didn't work now with the password you set through kadmin
+[root@acmecomp ~]# LDAPTLS_CACERTDIR=/etc/ssl/certs/ ldapsearch -ZZ  -h localhost  -D "uid=jinxolin,ou=People,dc=acme,dc=com" -w qwerty -b "ou=People,dc=acme,dc=com" uid=jinxolin
+# extended LDIF
+#
+# LDAPv3
+# base <ou=People,dc=acme,dc=com> with scope subtree
+# filter: uid=jinxolin
+# requesting: ALL
+#
+
+# jinxolin, People, acme.com
+dn: uid=jinxolin,ou=People,dc=acme,dc=com
+<snip>
+result: 0 Success
+
+# numResponses: 2
+# numEntries: 1
+
+* As you can see that worked well and it shows the passwords are synced
+between MIT kerbers and your LDAP server
+
+* This works just as well with the kpasswd program
+
+[root@ldn4lin15 ~]# kpasswd jinxolin
+Password for jinxolin@ACME.COM:
+Enter new password:
+Enter it again:
+Password changed.
+[root@ldn4lin15 ~]#
+
+
+[root@ldn4lin15 ~]# LDAPTLS_CACERTDIR=/etc/ssl/certs/ ldapsearch -ZZ  -h localhost  -D "uid=jinxolin,ou=People,dc=acme,dc=com" -w qwerty -b "ou=People,dc=acme,dc=com" uid=jinxolin
+ldap_bind: Invalid credentials (49)
+
+* Again old password doesn't work, the new one below does.
+
+[root@ldn4lin15 ~]# LDAPTLS_CACERTDIR=/etc/ssl/certs/ ldapsearch -ZZ  -h localhost  -D "uid=jinxolin,ou=People,dc=acme,dc=com" -w asdfgh -b "ou=People,dc=acme,dc=com" uid=jinxolin
+# extended LDIF
+#
+# LDAPv3
+# base <ou=People,dc=acme,dc=com> with scope subtree
+# filter: uid=jinxolin
+# requesting: ALL
+#
+
+# jinxolin, People, acme.com
+dn: uid=jinxolin,ou=People,dc=acme,dc=com
+loginShell: /bin/bash
+gidNumber: 10002
+uidNumber: 10002
+uid: jinxolin
+objectClass: account
+objectClass: posixAccount
+objectClass: top
+homeDirectory: /home/jinxolin
+cn: jinxolin
+
+# search result
+search: 3
+result: 0 Success
+
+# numResponses: 2
+# numEntries: 1
+
+
